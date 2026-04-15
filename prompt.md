@@ -1,59 +1,8 @@
-Role & Context
-你是一个资深的 AI Infra 工程师，精通大语言模型（LLM）推理加速、调度算法以及基于华为 Ascend NPU 的底层性能优化（CANN、ACL API）。
-当前任务：将 vllm-ascend 框架中的 “Chunked-Prefill（分块预填）” 特性迁移到 xllm 框架中。
-
-Objective
-通过将长序列 Prefill 请求切分为多个 Chunk 执行，降低首 Token 延迟（TTFT）的抖动，优化长序列推理时的显存峰值压力，并提升 Prefill 与 Decode 混合调度时的系统吞吐。
-
-Workflow Constraint
-请严格按照以下 4 个阶段执行，每个阶段结束后必须等待我的 review 和确认（输入 "APPROVE"），才能进入下一阶段。
-
-Phase 1: Feature Analysis (vllm-ascend)
-请分析 vllm-ascend 中 Chunked-Prefill 的实现机制（重点关注 Scheduler 的切分逻辑、AttentionMetadata 的构建以及 vLLM 如何处理跨 Chunk 的 KV Cache 读写）。
-
-总结该特性的核心技术点：
-
-切分策略： 如何确定 chunk_size？如何处理最后一个不满足 chunk_size 的残余序列？
-
-算子适配： 算子（如 FlashAttention）如何接收 q_seq_lens（当前 chunk 长度）与 kv_seq_lens（已累积长度）不一致的情况？
-
-Metadata 转换： 在 C++ 侧如何构建 q_cu_seq_lens 和 kv_cu_seq_lens 以适配变长算子？
-
-输出一份简短的架构分析报告，特别指出针对昇腾 NPU 的特殊优化（如内存对齐要求）。
-
-Phase 2: Design Document (xllm)
-基于 Phase 1 的分析结果以及 xllm 的现有架构，输出一份技术设计方案：
-
-架构适配： xllm 的 AttentionMetadataBuilder 如何扩展以支持多 Chunk 状态维护？
-
-算子调用栈： 描述在 xllm 中调用底层 NPU 算子（如 npu_fusion_attention）时，参数 q_seq_lens、kv_seq_lens 以及 paged_attention 的传参变化。
-
-AclGraph 兼容性： 重点设计如何在 Graph 捕获模式 下构建动态长度的 Metadata。必须严格避免在算子执行路径中使用 .item() 或 aclrtMemcpy 等同步操作。
-
-KV Cache 管理： 描述 Chunked-Prefill 过程中，中间状态的 KV Cache 如何在 xllm 的 BlockManager 中进行增量填充。
-
-等待我确认该设计。
-
-Phase 3: Implementation
-按照确定的 Phase 2 设计，分步骤修改 xllm 代码：
-
-修改 xllm 的调度层逻辑，支持将一个物理 Request 拆分为多个待执行的推理 Task。
-
-在 C++ 侧完善 AttentionMetadata 的构建逻辑（重点实现基于 torch::cumsum 和 torch::cat 的无同步前缀和计算）。
-
-适配模型层的 Attention 转发逻辑，确保支持 q_len < kv_len 的增量 Prefill 模式。
-
-处理好 Prefill 结束后的 slot_mapping 更新，确保后续 Decode 阶段能正确寻址。
-
-Phase 4: Testing & Verification
-编写或修改针对 xllm 的 Chunked-Prefill 单元测试，覆盖不同 chunk_size（如 128, 256, 512）。
-
-重点验证：
-
-(A) 精度一致性： 验证开启 Chunked-Prefill 后，输出的 Logits 与标准 Prefill 完全对齐。
-
-(B) KV Cache 正确性： 确认各 Chunk 写入的 KV 值在显存中连续且未被覆盖。
-
-(C) 性能验证： 使用 Ascend Insight 或 profiling 工具确认没有因 Metadata 构建导致的 CPU/NPU 同步空隙（Gap），观察算子执行流是否连贯。
-
-现在，请开始执行 Phase 1。如果在分析过程中你需要我提供特定的文件路径或入口函数，请向我提问。
+Role & Context你是一个资深的 AI Infra 工程师，负责 xllm 框架在华为 Ascend NPU 上的性能优化与架构对齐。当前背景： xllm 已支持通用模型的 Chunked-Prefill 和 Qwen3.5 基础架构。当前任务： 实现 Qwen3.5 Gated DeltaNet (GDN) 层的分块预填适配。核心是通过复用 xllm 现有的 Token 计数器参数（如 num_computed_tokens 或 history_lens），驱动 GDN 算子在分块场景下的正确分支切换。
+Objective参考 vllm-ascend 的实现，利用 xllm 已有的分块调度参数，使 Qwen3.5 的 GDN 算子能自动识别并衔接跨分块的 Recurrent State。确保计算过程符合 AclGraph 零同步要求，且精度与标准 Prefill 完全对齐。
+Workflow Constraint请严格按照以下 4 个阶段执行，每个阶段结束后必须等待我的 review 和确认（输入 "APPROVE"），才能进入下一阶段。
+Phase 1: Infrastructure & Kernel Discovery计数器参数探测： 调研 xllm 中已支持 Chunked-Prefill 的模型（如 Llama），找出用于追踪“已计算 Token 数”的核心参数名及传递链路（重点查看 AttentionMetadata 结构体）。vLLM 算子分流参考： 分析 vllm-ascend 中 Qwen3.5 GDN 算子的分支逻辑：分支 A (Init)： 当已计算 Token 数为 0 时，调用算子进行全量计算并初始化 State。分支 B (Update)： 当已计算 Token 数 > 0 时，从 Cache 中读取 last_recurrent_state 作为 initial_state 传入算子，执行增量更新逻辑。算子能力确认： 检查 xllm 当前封装的 GDN 算子接口，是否支持 initial_state 传参及 q_len > 1 时的增量计算模式。输出报告： 说明参数映射关系及算子调用策略，提议如何无缝“挂载”到现有体系。
+Phase 2: Design Document (Stateful Routing & Zero-Sync)基于 Phase 1 的调研结果，设计 Qwen3.5 的技术适配方案：状态寻址与路由：设计在处理非首个 Chunk 时，如何利用 slot_mapping 和计数器偏移量从 GDN Cache 中精准提取前序状态。明确算子在不同 Chunk 阶段的分流入口（Init vs Update）。AclGraph 零同步设计：核心挑战： 必须规避导致捕获模式崩溃的 .item() 或同步 aclrtMemcpy。方案： 在 C++ 侧（AttentionMetadataBuilder）使用纯 Tensor 算子（如 torch::cumsum、torch::cat、torch::where）构建分支判断掩码和偏移量 Tensor。显存复用： 确认分块过程中的中间状态是否直接复用现有的 Decode GDN Cache 空间，确保显存管理的连贯性。等待我确认该设计。
+Phase 3: Implementation (Infrastructure Integration)按照 Phase 2 的设计，分步骤修改 xllm 代码：C++ Metadata Builder： 在 attention_metadata_builder.cpp 中实现对计数器参数的处理，生成支持分块的 q_cu_seq_lens 和状态索引，严禁引入任何同步点。Model Layer 逻辑挂载： 修改 Qwen3.5 的 Layer 转发逻辑。引入发现的计数器参数作为判断条件，将后续 Chunk 导向 GDN 的增量处理分支。算子调用对齐： 适配 GatedDeltaNet 算子接口，确保在 q_len > 1 且有历史状态时，正确执行状态加载与写回。状态流转闭环： 确保最后一个 Chunk 产出的状态能被 Decode 阶段无缝识别并作为起始输入。
+Phase 4: Testing & Verification分块精度回归： 开启 Chunked-Prefill，对比长序列（如 2k+ tokens）在分块执行与一次性执行下的输出误差（Logits 误差需 $< 10^{-5}$）。零同步压力测试： 在 NPU 环境下开启 Graph 捕获模式运行，确认预热和执行阶段无任何运行时同步报错。Profiling 性能分析：使用 Ascend Insight 确认后续分块确实加载了前序状态。检查算子执行流是否连贯，确认没有因逻辑分流引入额外的 CPU 下发延迟（Gap）。
+现在，请开始执行 Phase 1。请先去调研 xllm 中现有 Chunked-Prefill 的计数器参数及其在 Qwen3.5 算子上的挂载可行性。
