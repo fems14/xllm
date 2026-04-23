@@ -1,0 +1,105 @@
+
+std::pair<torch::Tensor, torch::Tensor> Qwen3NextRMSNormImpl::forward(torch::Tensor& input, torch::Tensor& residual) {
+  auto [norm_output, rstd, fused_residual]=at_npu::native::custom_ops::npu_add_rms_norm(input, residual, 1.0 + weight_, eps_);
+  return {norm_output,fused_residual};
+}
+
+  std::pair<torch::Tensor, torch::Tensor> forward(torch::Tensor& input, torch::Tensor& residual);
+
+
+
+
+#include <optional>
+#include <tuple>
+std::pair<torch::Tensor, torch::Tensor> Qwen3HybridDecoderLayerImplBase::forward(
+// torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
+    torch::Tensor& x,
+    std::optional<torch::Tensor> residual,
+    torch::Tensor& positions,
+    const AttentionMetadata& attn_metadata,
+    KVCache& kv_cache,
+    const ModelInputParams& input_params) {
+  // Pre-attention norm
+  if (residual.has_value()) {
+    // std::tie(x, *residual) = input_norm_->forward(x, residual.value());
+    auto [new_x, new_res] = input_norm_->forward(x, residual.value());
+    x = new_x;
+    residual = new_res;
+  } else {
+    residual = x;
+    x = input_norm_->forward(x);
+  }
+
+  // Attention
+  if (attention_) {
+    x = attention_->forward(positions, x, attn_metadata, kv_cache);
+  } else {
+    x = linear_attention_->forward(x, attn_metadata, kv_cache, input_params);
+  }
+
+  auto [new_x, new_res] = input_norm_->forward(x, residual.value());
+  x = new_x;
+  residual = new_res;
+
+  // MLP forward
+  if (moe_mlp_) {
+    x = moe_mlp_(x, input_params);
+  } else {
+    x = mlp_(x);
+  }
+
+
+
+  virtual std::pair<torch::Tensor, torch::Tensor> forward(torch::Tensor& x,
+                                std::optional<torch::Tensor> residual,
+                                torch::Tensor& positions,
+                                const AttentionMetadata& attn_metadata,
+                                KVCache& kv_cache,
+                                const ModelInputParams& input_params) = 0;
+
+  std::pair<torch::Tensor, torch::Tensor> forward(torch::Tensor& x,
+                        std::optional<torch::Tensor> residual,
+                        torch::Tensor& positions,
+                        const AttentionMetadata& attn_metadata,
+                        KVCache& kv_cache,
+                        const ModelInputParams& input_params) override;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+std::optional<torch::Tensor> residual = std::nullopt;
+    for (size_t i = 0; i < layers_.size(); i++) {
+      auto& layer = layers_[i];
+      auto [new_h, new_res] = layer->forward(
+          h, residual, positions, attn_metadata, kv_caches[i], input_params);
+      h = new_h;
+      residual = new_res;
+    }
+    auto [new_h, new_res] = norm_->forward(h, residual.value());
+    h = new_h;
+
+
+  return {x, residual.value()};
+}
