@@ -16,6 +16,7 @@ limitations under the License.
 #include "qwen3_next_rms_norm.h"
 
 #include <glog/logging.h>
+#include  "torch_npu/csrc/aten/CustomFunctions.h"
 
 #include "xllm/core/kernels/ops_api.h"
 
@@ -36,6 +37,11 @@ torch::Tensor Qwen3NextRMSNormImpl::forward(torch::Tensor& input) {
   norm_params.epsilon = eps_;
   xllm::kernel::gemma_rms_norm(norm_params);
   return norm_params.norm_out;
+}
+
+std::pair<torch::Tensor, torch::Tensor> Qwen3NextRMSNormImpl::forward(torch::Tensor& input, torch::Tensor& residual) {
+  auto [norm_output, rstd, fused_residual]=at_npu::native::custom_ops::npu_add_rms_norm(input, residual, 1.0 + weight_, eps_);
+  return {norm_output,fused_residual};
 }
 
 void Qwen3NextRMSNormImpl::load_state_dict(const StateDict& state_dict) {

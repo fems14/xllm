@@ -16,6 +16,8 @@ limitations under the License.
 #include "qwen3_next_hybrid_decoder_layer_base.h"
 
 #include <algorithm>
+#include <optional>
+#include <tuple>
 
 namespace xllm {
 namespace layer {
@@ -104,16 +106,25 @@ void Qwen3HybridDecoderLayerImplBase::verify_loaded_weights(
   }
 }
 
-torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
+std::pair<torch::Tensor, torch::Tensor> Qwen3HybridDecoderLayerImplBase::forward(
+// torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
     torch::Tensor& x,
+    std::optional<torch::Tensor> residual,
     torch::Tensor& positions,
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const ModelInputParams& input_params,
     const torch::Tensor& mrope_cos_sin) {
   // Pre-attention norm
-  torch::Tensor residual = x;
-  x = input_norm_(x);
+  if (residual.has_value()) {
+    // std::tie(x, *residual) = input_norm_->forward(x, residual.value());
+    auto [new_x, new_res] = input_norm_->forward(x, residual.value());
+    x = new_x;
+    residual = new_res;
+  } else {
+    residual = x;
+    x = input_norm_->forward(x);
+  }
 
   // Attention
   if (attention_) {
@@ -123,17 +134,9 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
     x = linear_attention_->forward(x, attn_metadata, kv_cache, input_params);
   }
 
-  auto orig_dtype = x.dtype();
-  if (orig_dtype == torch::kBFloat16) {
-    x = x.to(torch::kFloat32);
-    residual = residual.to(torch::kFloat32);
-  }
-  x = x + residual;
-
-  // Post-attention norm
-  residual = x;
-  x = x.to(orig_dtype);
-  x = post_norm_(x);
+  auto [new_x, new_res] = input_norm_->forward(x, residual.value());
+  x = new_x;
+  residual = new_res;
 
   // MLP forward
   if (moe_mlp_) {
@@ -142,14 +145,7 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
     x = mlp_(x);
   }
 
-  orig_dtype = x.dtype();
-  if (orig_dtype == torch::kBFloat16) {
-    x = x.to(torch::kFloat32);
-    residual = residual.to(torch::kFloat32);
-  }
-  x = x + residual;
-  x = x.to(orig_dtype);
-  return x;
+  return {x, residual.value()};
 }
 
 torch::Tensor Qwen3HybridDecoderLayerImplBase::build_mrope_cos_sin(
